@@ -14,6 +14,10 @@
 #include "webp/config.h"
 #endif
 
+#if defined(__unix__) || defined(__CYGWIN__)
+#define _POSIX_C_SOURCE 200112L  // for setenv
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +40,8 @@
 #include "webp/decode.h"
 #include "webp/demux.h"
 
-#include "./example_util.h"
+#include "../examples/example_util.h"
+#include "../imageio/imageio_util.h"
 
 #if defined(_MSC_VER) && _MSC_VER < 1900
 #define snprintf _snprintf
@@ -49,6 +54,7 @@ static struct {
   int done;
   int decoding_error;
   int print_info;
+  int only_deltas;
   int use_color_profile;
 
   int canvas_width, canvas_height;
@@ -63,6 +69,7 @@ static struct {
   WebPIterator curr_frame;
   WebPIterator prev_frame;
   WebPChunkIterator iccp;
+  int viewport_width, viewport_height;
 } kParams;
 
 static void ClearPreviousPic(void) {
@@ -241,19 +248,28 @@ static void HandleKey(unsigned char key, int pos_x, int pos_y) {
       }
     }
   } else if (key == 'i') {
+    // Note: doesn't handle refresh of animation's last-frame (it's quite
+    // more involved to do, since you need to save the previous frame).
     kParams.print_info = 1 - kParams.print_info;
+    if (!kParams.has_animation) ClearPreviousFrame();
+    glutPostRedisplay();
+  } else if (key == 'd') {
+    kParams.only_deltas = 1 - kParams.only_deltas;
     glutPostRedisplay();
   }
 }
 
 static void HandleReshape(int width, int height) {
-  // TODO(skal): proper handling of resize, esp. for large pictures.
-  // + key control of the zoom.
+  // Note: reshape doesn't preserve aspect ratio, and might
+  // be handling larger-than-screen pictures incorrectly.
   glViewport(0, 0, width, height);
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
+  kParams.viewport_width = width;
+  kParams.viewport_height = height;
+  if (!kParams.has_animation) ClearPreviousFrame();
 }
 
 static void PrintString(const char* const text) {
@@ -295,32 +311,42 @@ static void HandleDisplay(void) {
   GLfloat xoff, yoff;
   if (pic == NULL) return;
   glPushMatrix();
-  glPixelZoom(1, -1);
+  glPixelZoom((GLfloat)(+1. / kParams.canvas_width * kParams.viewport_width),
+              (GLfloat)(-1. / kParams.canvas_height * kParams.viewport_height));
   xoff = (GLfloat)(2. * curr->x_offset / kParams.canvas_width);
   yoff = (GLfloat)(2. * curr->y_offset / kParams.canvas_height);
   glRasterPos2f(-1.f + xoff, 1.f - yoff);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   glPixelStorei(GL_UNPACK_ROW_LENGTH, pic->u.RGBA.stride / 4);
 
-  if (prev->dispose_method == WEBP_MUX_DISPOSE_BACKGROUND ||
+  if (kParams.only_deltas) {
+    DrawCheckerBoard();
+  } else if (prev->dispose_method == WEBP_MUX_DISPOSE_BACKGROUND ||
       curr->blend_method == WEBP_MUX_NO_BLEND) {
-    // TODO(later): these offsets and those above should factor in window size.
-    //              they will be incorrect if the window is resized.
     // glScissor() takes window coordinates (0,0 at bottom left).
     int window_x, window_y;
+    int frame_w, frame_h;
     if (prev->dispose_method == WEBP_MUX_DISPOSE_BACKGROUND) {
       // Clear the previous frame rectangle.
       window_x = prev->x_offset;
       window_y = kParams.canvas_height - prev->y_offset - prev->height;
+      frame_w = prev->width;
+      frame_h = prev->height;
     } else {  // curr->blend_method == WEBP_MUX_NO_BLEND.
       // We simulate no-blending behavior by first clearing the current frame
       // rectangle (to a checker-board) and then alpha-blending against it.
       window_x = curr->x_offset;
       window_y = kParams.canvas_height - curr->y_offset - curr->height;
+      frame_w = curr->width;
+      frame_h = curr->height;
     }
     glEnable(GL_SCISSOR_TEST);
     // Only update the requested area, not the whole canvas.
-    glScissor(window_x, window_y, prev->width, prev->height);
+    window_x = window_x * kParams.viewport_width / kParams.canvas_width;
+    window_y = window_y * kParams.viewport_height / kParams.canvas_height;
+    frame_w = frame_w * kParams.viewport_width / kParams.canvas_width;
+    frame_h = frame_h * kParams.viewport_height / kParams.canvas_height;
+    glScissor(window_x, window_y, frame_w, frame_h);
 
     glClear(GL_COLOR_BUFFER_BIT);  // use clear color
     DrawCheckerBoard();
@@ -352,16 +378,27 @@ static void HandleDisplay(void) {
     }
   }
   glPopMatrix();
+#if defined(__APPLE__) || defined(_WIN32)
   glFlush();
+#else
+  glutSwapBuffers();
+#endif
 }
 
 static void StartDisplay(void) {
   const int width = kParams.canvas_width;
   const int height = kParams.canvas_height;
+  // TODO(webp:365) GLUT_DOUBLE results in flickering / old frames to be
+  // partially displayed with animated webp + alpha.
+#if defined(__APPLE__) || defined(_WIN32)
   glutInitDisplayMode(GLUT_RGBA);
+#else
+  glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA);
+#endif
   glutInitWindowSize(width, height);
   glutCreateWindow("WebP viewer");
   glutDisplayFunc(HandleDisplay);
+  glutReshapeFunc(HandleReshape);
   glutIdleFunc(NULL);
   glutKeyboardFunc(HandleKey);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -370,7 +407,6 @@ static void StartDisplay(void) {
                GetColorf(kParams.bg_color, 8),
                GetColorf(kParams.bg_color, 16),
                GetColorf(kParams.bg_color, 24));
-  HandleReshape(width, height);
   glClear(GL_COLOR_BUFFER_BIT);
   DrawCheckerBoard();
 }
@@ -382,7 +418,7 @@ static void Help(void) {
   printf("Usage: vwebp in_file [options]\n\n"
          "Decodes the WebP image file and visualize it using OpenGL\n"
          "Options are:\n"
-         "  -version  .... print version number and exit\n"
+         "  -version ..... print version number and exit\n"
          "  -noicc ....... don't use the icc profile if present\n"
          "  -nofancy ..... don't use the fancy YUV420 upscaler\n"
          "  -nofilter .... disable in-loop filtering\n"
@@ -390,11 +426,12 @@ static void Help(void) {
          "  -noalphadither disable alpha plane dithering\n"
          "  -mt .......... use multi-threading\n"
          "  -info ........ print info\n"
-         "  -h     ....... this help message\n"
+         "  -h ........... this help message\n"
          "\n"
          "Keyboard shortcuts:\n"
          "  'c' ................ toggle use of color profile\n"
          "  'i' ................ overlay file information\n"
+         "  'd' ................ disable blending & disposal (debug)\n"
          "  'q' / 'Q' / ESC .... quit\n"
         );
 }
@@ -463,8 +500,8 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  if (!ExUtilReadFile(kParams.file_name,
-                      &kParams.data.bytes, &kParams.data.size)) {
+  if (!ImgIoUtilReadFile(kParams.file_name,
+                         &kParams.data.bytes, &kParams.data.size)) {
     goto Error;
   }
 
@@ -479,10 +516,6 @@ int main(int argc, char *argv[]) {
     goto Error;
   }
 
-  if (WebPDemuxGetI(kParams.dmux, WEBP_FF_FORMAT_FLAGS) & FRAGMENTS_FLAG) {
-    fprintf(stderr, "Image fragments are not supported for now!\n");
-    goto Error;
-  }
   kParams.canvas_width = WebPDemuxGetI(kParams.dmux, WEBP_FF_CANVAS_WIDTH);
   kParams.canvas_height = WebPDemuxGetI(kParams.dmux, WEBP_FF_CANVAS_HEIGHT);
   if (kParams.print_info) {
@@ -520,6 +553,12 @@ int main(int argc, char *argv[]) {
   // We take this into account by bumping up loop_count.
   WebPDemuxGetFrame(kParams.dmux, 0, curr);
   if (kParams.loop_count) ++kParams.loop_count;
+
+#if defined(__unix__) || defined(__CYGWIN__)
+  // Work around GLUT compositor bug.
+  // https://bugs.launchpad.net/ubuntu/+source/freeglut/+bug/369891
+  setenv("XLIB_SKIP_ARGB_VISUALS", "1", 1);
+#endif
 
   // Start display (and timer)
   glutInit(&argc, argv);
