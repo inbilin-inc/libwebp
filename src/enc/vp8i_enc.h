@@ -30,9 +30,9 @@ extern "C" {
 // Various defines and enums
 
 // version numbers
-#define ENC_MAJ_VERSION 0
-#define ENC_MIN_VERSION 6
-#define ENC_REV_VERSION 1
+#define ENC_MAJ_VERSION 1
+#define ENC_MIN_VERSION 0
+#define ENC_REV_VERSION 2
 
 enum { MAX_LF_LEVELS = 64,       // Maximum loop filter level
        MAX_VARIABLE_LEVEL = 67,  // last (inclusive) level with variable cost
@@ -121,7 +121,7 @@ static WEBP_INLINE int QUANTDIV(uint32_t n, uint32_t iQ, uint32_t B) {
 // #define DISABLE_TOKEN_BUFFER
 
 // quality below which error-diffusion is enabled
-#define ERROR_DIFFUSION_QUALITY 30
+#define ERROR_DIFFUSION_QUALITY 98
 
 //------------------------------------------------------------------------------
 // Headers
@@ -204,7 +204,7 @@ typedef struct {
   score_t i4_penalty_;   // penalty for using Intra4
 } VP8SegmentInfo;
 
-typedef int16_t DError[2 /* u/v */][2 /* top or left */];
+typedef int8_t DError[2 /* u/v */][2 /* top or left */];
 
 // Handy transient struct to accumulate score and info during RD-optimization
 // and mode evaluation.
@@ -218,7 +218,7 @@ typedef struct {
   uint8_t modes_i4[16];       // mode numbers for intra4 predictions
   int mode_uv;                // mode number of chroma prediction
   uint32_t nz;                // non-zero blocks
-  int16_t derr[2][3];         // DC diffusion errors for U/V for blocks #1/2/3
+  int8_t derr[2][3];          // DC diffusion errors for U/V for blocks #1/2/3
 } VP8ModeScore;
 
 // Iterator structure to iterate through macroblocks, pointing to the
@@ -278,7 +278,7 @@ int VP8IteratorIsDone(const VP8EncIterator* const it);
 // Import uncompressed samples from source.
 // If tmp_32 is not NULL, import boundary samples too.
 // tmp_32 is a 32-bytes scratch buffer that must be aligned in memory.
-void VP8IteratorImport(VP8EncIterator* const it, uint8_t* tmp_32);
+void VP8IteratorImport(VP8EncIterator* const it, uint8_t* const tmp_32);
 // export decimated samples
 void VP8IteratorExport(const VP8EncIterator* const it);
 // go to next macroblock. Returns false if not finished.
@@ -515,4 +515,4 @@ void WebPCleanupTransparentAreaLossless(WebPPicture* const pic);
 }    // extern "C"
 #endif
 
-#endif  /* WEBP_ENC_VP8I_ENC_H_ */
+#endif  // WEBP_ENC_VP8I_ENC_H_

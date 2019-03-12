@@ -15,6 +15,7 @@
 #include <math.h>
 #include <stdlib.h>  // for abs()
 
+#include "src/dsp/quant.h"
 #include "src/enc/vp8i_enc.h"
 #include "src/enc/cost_enc.h"
 
@@ -829,11 +830,12 @@ static int ReconstructIntra4(VP8EncIterator* const it,
 //------------------------------------------------------------------------------
 // DC-error diffusion
 
-// Diffusion weights. We under-correct a bit (3/4th of the error is actually
+// Diffusion weights. We under-correct a bit (15/16th of the error is actually
 // diffused) to avoid 'rainbow' chessboard pattern of blocks at q~=0.
-#define C1 2    // fraction of error sent to the 4x4 block below
-#define C2 1    // fraction of error sent to the 4x4 block on the right
-#define DSHIFT 2
+#define C1 7    // fraction of error sent to the 4x4 block below
+#define C2 8    // fraction of error sent to the 4x4 block on the right
+#define DSHIFT 4
+#define DSCALE 1   // storage descaling, needed to make the error fit int8_t
 
 // Quantize as usual, but also compute and return the quantization error.
 // Error is already divided by DSHIFT.
@@ -845,10 +847,10 @@ static int QuantizeSingle(int16_t* const v, const VP8Matrix* const mtx) {
     const int qV = QUANTDIV(V, mtx->iq_[0], mtx->bias_[0]) * mtx->q_[0];
     const int err = (V - qV);
     *v = sign ? -qV : qV;
-    return (sign ? -err : err) >> DSHIFT;
+    return (sign ? -err : err) >> DSCALE;
   }
   *v = 0;
-  return (sign ? -V : V) >> DSHIFT;
+  return (sign ? -V : V) >> DSCALE;
 }
 
 static void CorrectDCValues(const VP8EncIterator* const it,
@@ -863,21 +865,24 @@ static void CorrectDCValues(const VP8EncIterator* const it,
   // as top[]/left[] on the next block.
   int ch;
   for (ch = 0; ch <= 1; ++ch) {
-    const int16_t* const top = it->top_derr_[it->x_][ch];
-    const int16_t* const left = it->left_derr_[ch];
+    const int8_t* const top = it->top_derr_[it->x_][ch];
+    const int8_t* const left = it->left_derr_[ch];
     int16_t (* const c)[16] = &tmp[ch * 4];
     int err0, err1, err2, err3;
-    c[0][0] += C1 * top[0] + C2 * left[0];
+    c[0][0] += (C1 * top[0] + C2 * left[0]) >> (DSHIFT - DSCALE);
     err0 = QuantizeSingle(&c[0][0], mtx);
-    c[1][0] += C1 * top[1] + C2 * err0;
+    c[1][0] += (C1 * top[1] + C2 * err0) >> (DSHIFT - DSCALE);
     err1 = QuantizeSingle(&c[1][0], mtx);
-    c[2][0] += C1 * err0 + C2 * left[1];
+    c[2][0] += (C1 * err0 + C2 * left[1]) >> (DSHIFT - DSCALE);
     err2 = QuantizeSingle(&c[2][0], mtx);
-    c[3][0] += C1 * err1 + C2 * err2;
+    c[3][0] += (C1 * err1 + C2 * err2) >> (DSHIFT - DSCALE);
     err3 = QuantizeSingle(&c[3][0], mtx);
-    rd->derr[ch][0] = err1;
-    rd->derr[ch][1] = err2;
-    rd->derr[ch][2] = err3;
+    // error 'err' is bounded by mtx->q_[0] which is 132 at max. Hence
+    // err >> DSCALE will fit in an int8_t type if DSCALE>=1.
+    assert(abs(err1) <= 127 && abs(err2) <= 127 && abs(err3) <= 127);
+    rd->derr[ch][0] = (int8_t)err1;
+    rd->derr[ch][1] = (int8_t)err2;
+    rd->derr[ch][2] = (int8_t)err3;
   }
 }
 
@@ -885,18 +890,19 @@ static void StoreDiffusionErrors(VP8EncIterator* const it,
                                  const VP8ModeScore* const rd) {
   int ch;
   for (ch = 0; ch <= 1; ++ch) {
-    int16_t* const top = it->top_derr_[it->x_][ch];
-    int16_t* const left = it->left_derr_[ch];
-    left[0] = rd->derr[ch][0];   // restore err1
-    left[1] = rd->derr[ch][2];   //     ... err3
-    top[0]  = rd->derr[ch][1];   //     ... err2
-    top[1]  = rd->derr[ch][2];   //     ... err3.
+    int8_t* const top = it->top_derr_[it->x_][ch];
+    int8_t* const left = it->left_derr_[ch];
+    left[0] = rd->derr[ch][0];            // restore err1
+    left[1] = 3 * rd->derr[ch][2] >> 2;   //     ... 3/4th of err3
+    top[0]  = rd->derr[ch][1];            //     ... err2
+    top[1]  = rd->derr[ch][2] - left[1];  //     ... 1/4th of err3.
   }
 }
 
 #undef C1
 #undef C2
 #undef DSHIFT
+#undef DSCALE
 
 //------------------------------------------------------------------------------
 
@@ -970,19 +976,6 @@ static void SwapPtr(uint8_t** a, uint8_t** b) {
 
 static void SwapOut(VP8EncIterator* const it) {
   SwapPtr(&it->yuv_out_, &it->yuv_out2_);
-}
-
-static score_t IsFlat(const int16_t* levels, int num_blocks, score_t thresh) {
-  score_t score = 0;
-  while (num_blocks-- > 0) {      // TODO(skal): refine positional scoring?
-    int i;
-    for (i = 1; i < 16; ++i) {    // omit DC, we're only interested in AC
-      score += (levels[i] != 0);
-      if (score > thresh) return 0;
-    }
-    levels += 16;
-  }
-  return 1;
 }
 
 static void PickBestIntra16(VP8EncIterator* const it, VP8ModeScore* rd) {
