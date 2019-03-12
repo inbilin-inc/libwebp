@@ -1,6 +1,6 @@
 {
   "name": "libwebp",
-  "version": "0.4.3",
+  "version": "1.0.2",
   "summary": "Library to encode and decode images in WebP format.",
   "homepage": "https://developers.google.com/speed/webp/",
   "authors": "Google Inc.",
@@ -9,11 +9,20 @@
     "file": "COPYING"
   },
   "source": {
-    "git": "https://chromium.googlesource.com/webm/libwebp",
-    "tag": "v0.4.3"
+    "git": "https://github.com/webmproject/libwebp.git",
+    "tag": "v1.0.2"
   },
   "compiler_flags": "-D_THREAD_SAFE",
   "requires_arc": false,
+  "platforms": {
+    "osx": null,
+    "ios": null,
+    "tvos": null,
+    "watchos": null
+  },
+  "pod_target_xcconfig": {
+    "USER_HEADER_SEARCH_PATHS": "$(inherited) ${PODS_ROOT}/libwebp/**"
+  },
   "subspecs": [
     {
       "name": "webp",
